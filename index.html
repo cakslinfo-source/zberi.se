@@ -13,6 +13,7 @@
 <meta name="apple-mobile-web-app-title" content="Zberi se">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="icon" type="image/png" href="icon-192.png">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root{
     color-scheme: light;
@@ -318,7 +319,7 @@
       <div class="switch-auth" id="switchAuth">Že imaš račun? <b onclick="toggleAuth()">Prijava</b></div>
       <div class="forgot">Pozabljeno geslo? Pošlji e-pošto na <b>admin@zberise.si</b> in ti ga ponastavimo.</div>
     </div>
-    <div class="hint">Za preizkus admin pogleda se prijavi z:<br><b>admin@zberise.si</b> / geslo <b>admin</b><br><span style="opacity:.6">različica 1.5</span></div>
+    <div class="hint">Registriraj se s svojo e-pošto in geslom.<br><span style="opacity:.6">različica 2.0 · povezano z bazo</span></div>
   </div>
 
   <!-- ============ APP ============ -->
@@ -391,7 +392,8 @@ function plDog(n){const m100=n%100,m10=n%10;
   if(m10===2) return n+" dogodka";
   if(m10===3||m10===4) return n+" dogodki";
   return n+" dogodkov";}
-function avColor(id){return AV_COLORS[id % AV_COLORS.length]}
+function hashId(s){s=String(s);let h=0;for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))>>>0;return h;}
+function avColor(id){return AV_COLORS[hashId(id)%AV_COLORS.length]}
 
 /* dates helper: build ISO date from offset days */
 function dayISO(offset){const d=new Date();d.setDate(d.getDate()+offset);return d.toISOString().slice(0,10)}
@@ -464,20 +466,53 @@ function enrichSeed(){
     {userId:2,text:"Ja, super. Jaz pridem 5 min prej.",t:"14:20"}];
 }
 
-/* ===== TRAJNO SHRANJEVANJE (deluje na pravi napravi; varno se ignorira, če ni na voljo) ===== */
-const STORE_KEY="zberi_se_v1";
-let meId=null;
-function saveState(){ try{ localStorage.setItem(STORE_KEY, JSON.stringify({users,events,uid,eid,meId:me?me.id:null})); }catch(e){} }
-function loadState(){
-  try{ const s=localStorage.getItem(STORE_KEY); if(!s) return false;
-    const o=JSON.parse(s); if(!o||!o.users||!o.events) return false;
-    users=o.users; events=o.events; uid=o.uid; eid=o.eid; meId=o.meId||null;
-    events.forEach(e=>{ e.waitlist=e.waitlist||[]; e.messages=e.messages||[]; e.level=e.level||"Vsi nivoji"; e.parts=e.parts||[]; });
-    return true;
-  }catch(e){ return false; }
+/* ===== SUPABASE (skupna baza v oblaku) ===== */
+const SUPA_URL="https://wgjidewkqpffdirpstfj.supabase.co";
+const SUPA_KEY="sb_publishable_U8StJNEfUrZGBojLE-PPrg_R7A7_Fgw";
+let sb=null; try{ sb=window.supabase.createClient(SUPA_URL,SUPA_KEY); }catch(e){}
+let openId=null;          // trenutno odprt dogodek (za osvežitev)
+const chatDrafts={};      // osnutki sporočil (da se ne izgubijo ob živi osvežitvi)
+function saveState(){}    // ni več potrebno — vse je v bazi
+
+async function loadAll(){
+  const [pr,ev,pa,ms]=await Promise.all([
+    sb.from("profiles").select("*"),
+    sb.from("events").select("*"),
+    sb.from("participants").select("*").order("created_at",{ascending:true}),
+    sb.from("messages").select("*").order("created_at",{ascending:true})
+  ]);
+  users=(pr.data||[]).map(p=>({id:p.id,name:p.name||"Uporabnik",email:p.email,isAdmin:!!p.is_admin}));
+  events=(ev.data||[]).map(e=>({id:e.id,sport:e.sport,title:e.title,hostId:e.host_id,needed:e.needed,
+    location:e.location,date:e.event_date,time:e.event_time,duration:e.duration,level:e.level||"Vsi nivoji",
+    notes:e.notes||"",parts:[],waitlist:[],messages:[]}));
+  const emap={}; events.forEach(e=>emap[e.id]=e);
+  (pa.data||[]).forEach(p=>{const e=emap[p.event_id]; if(!e)return; (p.status==="waitlist"?e.waitlist:e.parts).push(p.user_id);});
+  (ms.data||[]).forEach(m=>{const e=emap[m.event_id]; if(!e)return; const t=new Date(m.created_at);
+    e.messages.push({userId:m.user_id,text:m.body,t:pad2(t.getHours())+":"+pad2(t.getMinutes())});});
 }
-if(loadState()){ me = meId ? (users.find(u=>u.id===meId)||null) : null; }
-else { seed(); enrichSeed(); me=null; saveState(); }
+function rerenderCurrent(){
+  if(!me) return;
+  if(document.getElementById("sheetScroll") && openId){
+    const inp=document.getElementById("chatIn-"+openId); if(inp) chatDrafts[openId]=inp.value;
+    openDetail(openId);
+  }
+  if(currentTab==="home")renderHome();else if(currentTab==="calendar")renderMine();
+  else if(currentTab==="admin")renderAdmin();else if(currentTab==="profile")renderProfile();
+}
+async function reloadAndRefresh(){ await loadAll(); rerenderCurrent(); }
+
+/* žive posodobitve med napravami */
+let rtChannel=null,rtT=null;
+function subscribeRealtime(){
+  if(rtChannel||!sb) return;
+  rtChannel=sb.channel("zberi-rt")
+    .on("postgres_changes",{event:"*",schema:"public",table:"events"},onRt)
+    .on("postgres_changes",{event:"*",schema:"public",table:"participants"},onRt)
+    .on("postgres_changes",{event:"*",schema:"public",table:"messages"},onRt)
+    .subscribe();
+}
+function onRt(){ clearTimeout(rtT); rtT=setTimeout(async()=>{ try{ await loadAll(); rerenderCurrent(); }catch(e){} },350); }
+function unsubscribeRealtime(){ if(rtChannel&&sb){ sb.removeChannel(rtChannel); rtChannel=null; } }
 
 /* ================= AUTH ================= */
 let authMode = "register"; // or login
@@ -491,23 +526,48 @@ function toggleAuth(){
   document.getElementById("authErr").style.display="none";
 }
 function authError(msg){const e=document.getElementById("authErr");e.textContent=msg;e.style.display="block"}
-function submitAuth(){
+function authBusy(b){ const btn=document.getElementById("authBtn"); if(!btn)return; btn.disabled=b; btn.style.opacity=b?.6:1;
+  btn.textContent=b?"Prosim počakaj ...":(authMode==="login"?"Prijava":"Ustvari račun"); }
+function prettyErr(e){ const m=(e&&e.message)||""; if(/already|exists|registered/i.test(m)) return "Ta e-pošta je že registrirana. Prijavi se.";
+  if(/password/i.test(m)) return "Geslo mora imeti vsaj 6 znakov."; return m||"Napaka pri registraciji."; }
+async function submitAuth(){
+  if(!sb) return authError("Ni povezave z bazo. Osveži stran in poskusi znova.");
   const name=document.getElementById("fName").value.trim();
   const email=document.getElementById("fEmail").value.trim().toLowerCase();
   const pass=document.getElementById("fPass").value;
   if(!email||!pass) return authError("Vnesi e-pošto in geslo.");
-  if(authMode==="register"){
-    if(!name) return authError("Vnesi svoje ime.");
-    if(users.some(u=>u.email===email)) return authError("Ta e-pošta je že registrirana. Prijavi se.");
-    const u={id:uid++, name, email, pass, isAdmin:false};
-    users.push(u); me=u;
-  } else {
-    const u=users.find(u=>u.email===email && u.pass===pass);
-    if(!u) return authError("Napačna e-pošta ali geslo.");
-    me=u;
-  }
-  saveState();
+  if(authMode==="register" && !name) return authError("Vnesi svoje ime.");
+  document.getElementById("authErr").style.display="none";
+  authBusy(true);
+  try{
+    if(authMode==="register"){
+      const {data,error}=await sb.auth.signUp({email,password:pass,options:{data:{name}}});
+      if(error){ authError(prettyErr(error)); return; }
+      if(data.user){ try{ await sb.from("profiles").upsert({id:data.user.id,name,email}); }catch(e){} }
+      if(!data.session){ authError("Račun ustvarjen. Preveri e-pošto za potrditev, nato se prijavi."); return; }
+      await afterLogin();
+    } else {
+      const {error}=await sb.auth.signInWithPassword({email,password:pass});
+      if(error){ authError("Napačna e-pošta ali geslo."); return; }
+      await afterLogin();
+    }
+  }catch(err){ authError("Napaka pri povezavi z bazo."); }
+  finally{ authBusy(false); }
+}
+async function afterLogin(){
+  const {data:{user}}=await sb.auth.getUser();
+  if(!user){ authError("Prijava ni uspela."); return; }
+  await ensureProfile(user);
+  await loadAll();
+  me = users.find(u=>u.id===user.id) || {id:user.id,name:(user.user_metadata&&user.user_metadata.name)||user.email,email:user.email,isAdmin:false};
+  subscribeRealtime();
   enterApp();
+}
+async function ensureProfile(user){
+  try{ const {data}=await sb.from("profiles").select("id").eq("id",user.id).maybeSingle();
+    if(!data){ const nm=(user.user_metadata&&user.user_metadata.name)||user.email;
+      await sb.from("profiles").upsert({id:user.id,name:nm,email:user.email}); }
+  }catch(e){}
 }
 function enterApp(){
   document.getElementById("auth").classList.add("hidden");
@@ -515,9 +575,13 @@ function enterApp(){
   document.getElementById("navAdmin").style.display = me.isAdmin ? "flex" : "none";
   go("home");
 }
-function logout(){me=null;saveState();document.getElementById("app").classList.add("hidden");
+async function logout(){
+  try{ await sb.auth.signOut(); }catch(e){}
+  me=null; openId=null; unsubscribeRealtime();
+  document.getElementById("app").classList.add("hidden");
   document.getElementById("auth").classList.remove("hidden");
-  document.getElementById("fName").value="";document.getElementById("fEmail").value="";document.getElementById("fPass").value="";}
+  document.getElementById("fName").value="";document.getElementById("fEmail").value="";document.getElementById("fPass").value="";
+}
 
 /* ================= NAV ================= */
 let currentTab="home";
@@ -595,7 +659,7 @@ function eventCard(e){
   const shown=e.parts.slice(0,4).map(id=>avatarHTML(id)).join("");
   const extra=e.parts.length>4?`<div class="av" style="background:#c3c2b7;color:#fff">+${e.parts.length-4}</div>`:"";
   const d=fmtDay(e.date);
-  return `<div class="card" onclick="openDetail(${e.id})">
+  return `<div class="card" onclick="openDetail('${e.id}')">
     ${iAmIn?'<div class="mine-tag">PRIJAVLJEN</div>':''}
     <div class="card-top">
       <div class="sport-ic" style="background:${s.color}22">${s.emoji}</div>
@@ -649,7 +713,7 @@ function renderMine(){
 }
 function pastCard(e){
   const s=sportById(e.sport); const d=fmtDay(e.date);
-  return `<div class="past-card" onclick="openDetail(${e.id})">
+  return `<div class="past-card" onclick="openDetail('${e.id}')">
     <div class="sport-ic" style="background:${s.color}22;width:40px;height:40px;font-size:20px;filter:grayscale(.15)">${s.emoji}</div>
     <div style="flex:1;min-width:0">
       <div style="font-weight:700;font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(e.title)}</div>
@@ -662,6 +726,7 @@ function pastCard(e){
 /* ================= DETAIL SHEET ================= */
 function openDetail(id){
   const e=events.find(x=>x.id===id); if(!e) return;
+  openId=id;
   const s=sportById(e.sport);
   const joined=e.parts.length, full=joined>=e.needed, iAmIn=e.parts.includes(me.id);
   const inWait=e.waitlist.includes(me.id);
@@ -691,21 +756,21 @@ function openDetail(id){
   let joinBtn;
   if(past) joinBtn=`<button class="join-btn join-full" disabled>✓ Dogodek je zaključen</button>`;
   else if(iAmIn && e.hostId===me.id) joinBtn=`<button class="join-btn join-full" disabled>Ti si organizator ✓</button>`;
-  else if(iAmIn) joinBtn=`<button class="join-btn join-leave" onclick="toggleJoin(${e.id})">Odjavi se z dogodka</button>`;
-  else if(full && inWait) joinBtn=`<button class="join-btn join-leave" onclick="toggleWait(${e.id})">Na čakalni listi — odjavi se</button>`;
-  else if(full) joinBtn=`<button class="join-btn" style="background:#fff4dc;color:#8a5a00" onclick="toggleWait(${e.id})">Ekipa polna — na čakalno listo ⏳</button>`;
-  else joinBtn=`<button class="join-btn join-yes" onclick="toggleJoin(${e.id})">Prijavim se — grem zraven! 🙌</button>`;
+  else if(iAmIn) joinBtn=`<button class="join-btn join-leave" onclick="toggleJoin('${e.id}')">Odjavi se z dogodka</button>`;
+  else if(full && inWait) joinBtn=`<button class="join-btn join-leave" onclick="toggleWait('${e.id}')">Na čakalni listi — odjavi se</button>`;
+  else if(full) joinBtn=`<button class="join-btn" style="background:#fff4dc;color:#8a5a00" onclick="toggleWait('${e.id}')">Ekipa polna — na čakalno listo ⏳</button>`;
+  else joinBtn=`<button class="join-btn join-yes" onclick="toggleJoin('${e.id}')">Prijavim se — grem zraven! 🙌</button>`;
 
   const adminCtrl = me.isAdmin ? `<div class="sheet-admin">
-      <button onclick="openEdit(${e.id})">✏️ Uredi dogodek</button>
-      <button class="del" onclick="deleteEvent(${e.id})">🗑 Izbriši</button></div>` : "";
+      <button onclick="openEdit('${e.id}')">✏️ Uredi dogodek</button>
+      <button class="del" onclick="deleteEvent('${e.id}')">🗑 Izbriši</button></div>` : "";
 
   document.getElementById("sheetHost").innerHTML=`
    <div class="sheet-back" onclick="if(event.target===this)closeSheet()">
     <div class="sheet" id="sheetScroll">
       <div class="sheet-handle"></div>
       <div class="sheet-hero" style="background:linear-gradient(135deg,${s.color},${shade(s.color)})">
-        <button class="sheet-share" onclick="shareEvent(${e.id})" title="Deli dogodek">↗</button>
+        <button class="sheet-share" onclick="shareEvent('${e.id}')" title="Deli dogodek">↗</button>
         <div style="font-size:34px">${s.emoji}</div>
         <h2>${escHtml(e.title)}</h2>
         <div class="sp">${s.name} · <span class="lvl-pill lvl-${lvlClass(e.level)}">${e.level||'Vsi nivoji'}</span> · ${full?'polna ekipa':'še '+emptySlots+' prosto'}</div>
@@ -713,7 +778,7 @@ function openDetail(id){
       <div class="sheet-body">
         <div class="detail-row"><div class="di">${svgIcon('clock')}</div><div style="flex:1"><div class="dl">Kdaj</div><div class="dv">${d.label}, ${d.date} ob ${e.time}</div></div></div>
         <div class="detail-row"><div class="di">${svgIcon('pin')}</div><div style="flex:1;min-width:0"><div class="dl">Zbirno mesto</div><div class="dv">${escHtml(e.location)}</div></div>
-          <button class="mini-nav" onclick="openMap(${e.id})">Navigacija ›</button></div>
+          <button class="mini-nav" onclick="openMap('${e.id}')">Navigacija ›</button></div>
         <div class="detail-row"><div class="di">${svgIcon('timer')}</div><div style="flex:1"><div class="dl">Predviden čas</div><div class="dv">${e.duration}</div></div></div>
         <div class="detail-row"><div class="di" style="font-size:18px">🎯</div><div style="flex:1"><div class="dl">Raven</div><div class="dv">${e.level||'Vsi nivoji'}</div></div></div>
         <div class="detail-row"><div class="di">${svgIcon('users')}</div><div style="flex:1"><div class="dl">Potrebnih oseb</div><div class="dv">${e.needed} (prijavljenih ${joined})</div></div></div>
@@ -722,14 +787,14 @@ function openDetail(id){
         <div class="parts"><h4>Ekipa (${joined}/${e.needed})</h4>${partsHTML}</div>
         ${waitHTML}
         ${joinBtn}
-        ${iAmIn&&!past?`<button class="join-btn" style="background:#eef6ee;color:#0a7a0a;margin-top:10px" onclick="addToCalendar(events.find(x=>x.id===${e.id}))">📅 Dodaj opomnik v koledar</button>`:""}
+        ${iAmIn&&!past?`<button class="join-btn" style="background:#eef6ee;color:#0a7a0a;margin-top:10px" onclick="addToCalendar(events.find(x=>x.id==='${e.id}'))">📅 Dodaj opomnik v koledar</button>`:""}
         ${adminCtrl}
         ${iAmIn ? `<div class="chat">
           <h4>💬 Klepet dogodka</h4>
           <div id="chatBox-${e.id}">${chatHTML}</div>
           <div class="chat-input">
-            <input id="chatIn-${e.id}" placeholder="Napiši sporočilo ..." onkeydown="if(event.key==='Enter')sendMsg(${e.id})">
-            <button onclick="sendMsg(${e.id})">Pošlji</button>
+            <input id="chatIn-${e.id}" value="${esc(chatDrafts[e.id]||'')}" placeholder="Napiši sporočilo ..." oninput="chatDrafts['${e.id}']=this.value" onkeydown="if(event.key==='Enter')sendMsg('${e.id}')">
+            <button onclick="sendMsg('${e.id}')">Pošlji</button>
           </div>
         </div>` : `<div class="chat">
           <h4>💬 Klepet dogodka</h4>
@@ -744,7 +809,7 @@ function openDetail(id){
    </div>`;
   loadWeather(e);
 }
-function closeSheet(){document.getElementById("sheetHost").innerHTML=""}
+function closeSheet(){document.getElementById("sheetHost").innerHTML="";openId=null;}
 function shade(hex){ // darken a hex ~22%
   const n=parseInt(hex.slice(1),16);let r=(n>>16)&255,g=(n>>8)&255,b=n&255;
   r=Math.round(r*.7);g=Math.round(g*.7);b=Math.round(b*.7);
@@ -800,43 +865,40 @@ function addToCalendar(e){
     setTimeout(()=>{a.remove();URL.revokeObjectURL(url)},1500);
   }catch(err){toast("Koledarja ni bilo mogoče odpreti")}
 }
-function toggleJoin(id){
-  const e=events.find(x=>x.id===id);
+async function toggleJoin(id){
+  const e=events.find(x=>x.id===id); if(!e||!sb) return;
   if(e.parts.includes(me.id)){
-    e.parts=e.parts.filter(p=>p!==me.id);
-    if(e.waitlist.length && e.parts.length<e.needed){
-      const promoted=e.waitlist.shift();
-      if(!e.parts.includes(promoted)) e.parts.push(promoted);
+    await sb.from("participants").delete().eq("event_id",id).eq("user_id",me.id);
+    if(e.waitlist.length && (e.parts.length-1)<e.needed){
+      const promoted=e.waitlist[0];
+      await sb.from("participants").update({status:"joined"}).eq("event_id",id).eq("user_id",promoted);
       const pu=users.find(u=>u.id===promoted);
       toast((pu?pu.name.split(" ")[0]:"Naslednji")+" premaknjen(a) s čakalne liste ⬆️");
     } else { toast("Odjavljen z dogodka"); }
   } else {
     if(e.parts.length>=e.needed){toast("Ekipa je že polna");return;}
-    e.parts.push(me.id);
+    const {error}=await sb.from("participants").upsert({event_id:id,user_id:me.id,status:"joined"},{onConflict:"event_id,user_id"});
+    if(error){ toast("Napaka pri prijavi"); return; }
     addToCalendar(e);   /* takoj doda opomnik v koledar (iOS / Android) */
-    toast(e.parts.length>=e.needed?"Prijavljen — opomnik v koledarju 📅":"Prijavljen! Opomnik dodan v koledar 📅");
+    toast("Prijavljen! Opomnik dodan v koledar 📅");
   }
-  saveState();
-  openDetail(id);
-  if(currentTab==="home")renderHome();else if(currentTab==="calendar")renderMine();else if(currentTab==="admin")renderAdmin();
+  await reloadAndRefresh();
 }
-function toggleWait(id){
-  const e=events.find(x=>x.id===id);
-  if(e.waitlist.includes(me.id)){ e.waitlist=e.waitlist.filter(p=>p!==me.id); toast("Odstranjen s čakalne liste"); }
-  else { e.waitlist.push(me.id); toast("Na čakalni listi ⏳ — obvestimo te, ko se sprosti mesto"); }
-  saveState();
-  openDetail(id);
-  if(currentTab==="home")renderHome();else if(currentTab==="calendar")renderMine();
+async function toggleWait(id){
+  const e=events.find(x=>x.id===id); if(!e||!sb) return;
+  if(e.waitlist.includes(me.id)){ await sb.from("participants").delete().eq("event_id",id).eq("user_id",me.id); toast("Odstranjen s čakalne liste"); }
+  else { await sb.from("participants").upsert({event_id:id,user_id:me.id,status:"waitlist"},{onConflict:"event_id,user_id"}); toast("Na čakalni listi ⏳ — obvestimo te, ko se sprosti mesto"); }
+  await reloadAndRefresh();
 }
-function sendMsg(id){
-  const inp=document.getElementById("chatIn-"+id); if(!inp) return;
+async function sendMsg(id){
+  const inp=document.getElementById("chatIn-"+id); if(!inp||!sb) return;
   const txt=inp.value.trim(); if(!txt) return;
-  const e=events.find(x=>x.id===id);
-  const now=new Date(); e.messages.push({userId:me.id,text:txt,t:pad2(now.getHours())+":"+pad2(now.getMinutes())});
-  saveState();
-  openDetail(id);
-  const ni=document.getElementById("chatIn-"+id); if(ni) ni.focus();
+  inp.value=""; chatDrafts[id]="";
+  const {error}=await sb.from("messages").insert({event_id:id,user_id:me.id,body:txt});
+  if(error){ toast("Sporočila ni bilo mogoče poslati"); inp.value=txt; return; }
+  await loadAll(); openDetail(id);
   const sc=document.getElementById("sheetScroll"); if(sc) sc.scrollTop=sc.scrollHeight;
+  const ni=document.getElementById("chatIn-"+id); if(ni) ni.focus();
 }
 function openMap(id){
   const e=events.find(x=>x.id===id);
@@ -935,49 +997,67 @@ function esc(s){return s.replace(/"/g,'&quot;').replace(/</g,'&lt;')}
 function pickSportSel(id){pickSport=id;
   document.querySelectorAll("#sportGrid .sport-pick").forEach((b,i)=>b.classList.toggle("active",SPORTS[i].id===id));}
 function stepNeed(d){const i=document.getElementById("eNeed");let v=parseInt(i.value)+d;v=Math.max(2,Math.min(30,v));i.value=v;}
-function saveEvent(){
+async function saveEvent(){
   const title=document.getElementById("eTitle").value.trim();
   const loc=document.getElementById("eLoc").value.trim();
   if(!title) return toast("Vnesi naslov dogodka");
   if(!loc) return toast("Vnesi zbirno mesto");
-  const data={sport:pickSport,title,location:loc,
-    date:document.getElementById("eDate").value,time:document.getElementById("eTime").value,
+  if(!sb) return toast("Ni povezave z bazo");
+  const row={sport:pickSport,title,location:loc,
+    event_date:document.getElementById("eDate").value,event_time:document.getElementById("eTime").value,
     needed:parseInt(document.getElementById("eNeed").value),duration:document.getElementById("eDur").value,
     level:document.getElementById("eLevel").value,
     notes:document.getElementById("eNotes").value.trim()};
-  if(editingId){Object.assign(events.find(x=>x.id===editingId),data);toast("Dogodek posodobljen ✓");}
-  else{events.push({id:eid++,hostId:me.id,parts:[me.id],waitlist:[],messages:[],...data});toast("Dogodek objavljen! 🎉");}
+  if(editingId){
+    const {error}=await sb.from("events").update(row).eq("id",editingId);
+    if(error){ toast("Napaka pri shranjevanju"); return; }
+    toast("Dogodek posodobljen ✓");
+  } else {
+    row.host_id=me.id;
+    const {data,error}=await sb.from("events").insert(row).select("id").single();
+    if(error){ toast("Napaka pri objavi"); return; }
+    await sb.from("participants").insert({event_id:data.id,user_id:me.id,status:"joined"});
+    toast("Dogodek objavljen! 🎉");
+  }
   editingId=null;
-  saveState();
+  await loadAll();
   go("home");
 }
-function deleteEvent(id){events=events.filter(e=>e.id!==id);saveState();closeSheet();toast("Dogodek izbrisan");
-  if(currentTab==="admin")renderAdmin();else go("home");}
+async function deleteEvent(id){
+  if(!sb) return;
+  const {error}=await sb.from("events").delete().eq("id",id);
+  if(error){ toast("Napaka pri brisanju (nimaš pravic?)"); return; }
+  closeSheet(); toast("Dogodek izbrisan");
+  await loadAll();
+  if(currentTab==="admin")renderAdmin();else go("home");
+}
 
-/* ===== ADMIN: ponastavitev gesla uporabnika ===== */
-function openPwdReset(userId){
-  const u=users.find(x=>x.id===userId); if(!u) return;
+/* ===== ADMIN: pošlji uporabniku povezavo za ponastavitev gesla ===== */
+async function adminResetPwd(userId){
+  const u=users.find(x=>x.id===userId); if(!u||!u.email||!sb) return;
+  const {error}=await sb.auth.resetPasswordForEmail(u.email,{redirectTo:location.origin+location.pathname});
+  toast(error ? "Napaka pri pošiljanju" : "Povezava za ponastavitev poslana na "+u.email);
+}
+/* ===== Nastavitev novega gesla (ko uporabnik klikne povezavo iz e-pošte) ===== */
+function openSetPassword(){
   document.getElementById("sheetHost").innerHTML=`
-   <div class="sheet-back" style="align-items:center" onclick="if(event.target===this)closeSheet()">
+   <div class="sheet-back" style="align-items:center">
      <div class="modal">
        <div class="modal-ic">🔑</div>
-       <h3>Ponastavi geslo</h3>
-       <p>Novo geslo za <b>${escHtml(u.name)}</b><br><span class="muted-e">${escHtml(u.email)}</span></p>
-       <input id="pwdNew" type="text" placeholder="Vnesi novo geslo" autocomplete="off">
-       <div class="modal-btns">
-         <button class="mb-cancel" onclick="closeSheet()">Prekliči</button>
-         <button class="mb-save" onclick="savePwd(${u.id})">Shrani geslo</button>
-       </div>
+       <h3>Nastavi novo geslo</h3>
+       <p>Vnesi novo geslo za svoj račun.</p>
+       <input id="npw" type="password" placeholder="Novo geslo (vsaj 6 znakov)" autocomplete="new-password">
+       <div class="modal-btns"><button class="mb-save" style="flex:1" onclick="doSetPassword()">Shrani</button></div>
      </div>
    </div>`;
-  setTimeout(()=>{const i=document.getElementById("pwdNew");if(i)i.focus();},60);
+  setTimeout(()=>{const i=document.getElementById("npw");if(i)i.focus();},60);
 }
-function savePwd(userId){
-  const u=users.find(x=>x.id===userId); if(!u) return;
-  const v=document.getElementById("pwdNew").value.trim();
-  if(!v){ toast("Vnesi novo geslo"); return; }
-  u.pass=v; saveState(); closeSheet();
-  toast("Geslo za "+u.name.split(" ")[0]+" ponastavljeno ✓");
+async function doSetPassword(){
+  const v=document.getElementById("npw").value.trim();
+  if(v.length<6){ toast("Geslo naj ima vsaj 6 znakov"); return; }
+  const {error}=await sb.auth.updateUser({password:v});
+  if(error){ toast("Napaka pri shranjevanju gesla"); return; }
+  closeSheet(); toast("Geslo posodobljeno ✓");
 }
 
 /* ================= ADMIN ================= */
@@ -1017,7 +1097,7 @@ function renderAdmin(){
       <div class="ai-ic" style="background:${s.color}22">${s.emoji}</div>
       <div style="flex:1;min-width:0"><div class="ai-t" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.title}</div>
         <div class="ai-s">${d.label} ${e.time} · ${e.parts.length}/${e.needed} ${full?'· polna':''}</div></div>
-      <button class="ai-edit" onclick="openEdit(${e.id})">Uredi</button>
+      <button class="ai-edit" onclick="openEdit('${e.id}')">Uredi</button>
     </div>`;
   }).join("");
 
@@ -1029,7 +1109,7 @@ function renderAdmin(){
         <div class="ai-t" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(u.name)}${u.isAdmin?' <span style="font-size:10px;background:#111;color:#fff;padding:1px 6px;border-radius:6px">ADMIN</span>':''}</div>
         <div class="ai-s" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(u.email)} · ${cnt} prijav</div>
       </div>
-      <button class="ai-edit" onclick="openPwdReset(${u.id})">🔑 Geslo</button>
+      <button class="ai-edit" onclick="adminResetPwd('${u.id}')">🔑 Ponastavi</button>
     </div>`;
   }).join("");
 
@@ -1098,7 +1178,7 @@ function renderProfile(){
       </div>
     </div>
     <button class="logout" onclick="logout()">Odjava</button>
-    <div style="text-align:center;color:var(--muted);font-size:11.5px;padding:0 0 16px">Zberi se · različica 1.5</div>`;
+    <div style="text-align:center;color:var(--muted);font-size:11.5px;padding:0 0 16px">Zberi se · različica 2.0</div>`;
 }
 
 /* ================= TOAST ================= */
@@ -1106,15 +1186,22 @@ let toastT;
 function toast(msg){const t=document.getElementById("toast");t.textContent=msg;t.classList.add("show");
   clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove("show"),2200);}
 
-/* ===== ZAGON: samodejna prijava, če je uporabnik shranjen ===== */
-if(me){ enterApp(); }
-
-/* ===== Med razvojem: odstrani morebitni star service worker in predpomnilnik,
-   da je vedno naložena najnovejša različica ===== */
+/* ===== Med razvojem: odstrani morebitni star service worker in predpomnilnik ===== */
 if("serviceWorker" in navigator){
   navigator.serviceWorker.getRegistrations().then(rs=>rs.forEach(r=>r.unregister())).catch(()=>{});
 }
 if(window.caches){ caches.keys().then(ks=>ks.forEach(k=>caches.delete(k))).catch(()=>{}); }
+
+/* ===== ZAGON: obnovi sejo iz baze ===== */
+async function boot(){
+  if(!sb){ authError("Ni povezave z bazo (preveri internet)."); return; }
+  try{
+    sb.auth.onAuthStateChange((ev)=>{ if(ev==="PASSWORD_RECOVERY") openSetPassword(); });
+    const {data:{session}}=await sb.auth.getSession();
+    if(session){ await afterLogin(); }
+  }catch(e){}
+}
+boot();
 </script>
 </body>
 </html>
