@@ -38,36 +38,40 @@
     --font:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-  html,body{margin:0;padding:0}
+  html,body{margin:0;padding:0;height:100%}
   body{
     font-family:var(--font);
     background:#e9e9e6;
     color:var(--text-primary);
     display:flex;justify-content:center;
     min-height:100vh;
+    overflow:hidden;
   }
   /* phone frame */
   #phone{
     width:100%;
     max-width:430px;
     background:var(--plane);
-    min-height:100vh;
+    height:100vh;
+    height:100dvh;
     position:relative;
     display:flex;flex-direction:column;
     box-shadow:0 0 60px rgba(0,0,0,.15);
     overflow:hidden;
   }
   @media(min-width:460px){
-    body{align-items:center;padding:24px 0}
+    body{align-items:center;padding:24px 0;overflow:auto}
     #phone{min-height:calc(100vh - 48px);height:900px;border-radius:38px;border:10px solid #111;overflow:hidden}
   }
-  .screen{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:90px}
+  .screen{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:calc(96px + env(safe-area-inset-bottom))}
   .hidden{display:none!important}
   button{font-family:var(--font);cursor:pointer;border:none;background:none}
   input,select,textarea{font-family:var(--font);font-size:16px}
 
   /* ---------- AUTH ---------- */
-  #auth{display:flex;flex-direction:column;justify-content:center;padding:32px 26px;min-height:100vh;background:
+  #auth{display:flex;flex-direction:column;justify-content:center;
+    padding:calc(32px + env(safe-area-inset-top)) 26px calc(32px + env(safe-area-inset-bottom));
+    height:100vh;height:100dvh;overflow-y:auto;background:
     radial-gradient(120% 60% at 50% 0%, #2a78d6 0%, #1b4f95 55%, #12356b 100%);color:#fff}
   .logo{font-size:40px;font-weight:800;letter-spacing:-1px;display:flex;align-items:center;gap:10px}
   .logo .dot{width:14px;height:14px;border-radius:50%;background:#eda100;box-shadow:0 0 0 5px rgba(237,161,0,.25)}
@@ -92,7 +96,7 @@
 
   /* ---------- TOPBAR ---------- */
   .topbar{position:sticky;top:0;z-index:20;background:var(--surface-1);
-    padding:14px 18px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}
+    padding:calc(14px + env(safe-area-inset-top)) 18px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}
   .topbar h1{font-size:20px;margin:0;font-weight:800;letter-spacing:-.5px;flex:1}
   .topbar .sub{font-size:12.5px;color:var(--muted);font-weight:500}
   .av{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;
@@ -126,6 +130,10 @@
   .slots{font-size:12.5px;color:var(--text-secondary);font-weight:600}
   .badge-full{background:#e7f6e7;color:#0a7a0a;font-size:11.5px;font-weight:800;padding:4px 9px;border-radius:8px;letter-spacing:.3px}
   .badge-open{background:var(--brand-soft);color:var(--brand-dark);font-size:11.5px;font-weight:800;padding:4px 9px;border-radius:8px}
+  .badge-done{background:#eef0f2;color:#6b6f76;font-size:10.5px;font-weight:800;padding:4px 9px;border-radius:8px;flex-shrink:0}
+  .past-card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:11px 13px;margin-bottom:10px;
+    display:flex;align-items:center;gap:11px;opacity:.82}
+  .past-card:active{transform:scale(.99)}
   .mine-tag{position:absolute;top:0;right:0;background:var(--brand);color:#fff;font-size:10.5px;font-weight:800;
     padding:4px 10px;border-bottom-left-radius:12px;letter-spacing:.4px}
   .progress{height:6px;background:var(--grid);border-radius:99px;margin-top:12px;overflow:hidden}
@@ -309,7 +317,7 @@
       <div class="switch-auth" id="switchAuth">Že imaš račun? <b onclick="toggleAuth()">Prijava</b></div>
       <div class="forgot">Pozabljeno geslo? Pošlji e-pošto na <b>admin@zberise.si</b> in ti ga ponastavimo.</div>
     </div>
-    <div class="hint">Za preizkus admin pogleda se prijavi z:<br><b>admin@zberise.si</b> / geslo <b>admin</b><br><span style="opacity:.6">različica 1.3</span></div>
+    <div class="hint">Za preizkus admin pogleda se prijavi z:<br><b>admin@zberise.si</b> / geslo <b>admin</b><br><span style="opacity:.6">različica 1.4</span></div>
   </div>
 
   <!-- ============ APP ============ -->
@@ -386,6 +394,10 @@ function avColor(id){return AV_COLORS[id % AV_COLORS.length]}
 
 /* dates helper: build ISO date from offset days */
 function dayISO(offset){const d=new Date();d.setDate(d.getDate()+offset);return d.toISOString().slice(0,10)}
+/* konec dogodka (datum+ura+trajanje) in ali je že minil */
+function eventEnd(e){ const p=(e.date||"").split("-").map(Number); const t=(e.time||"0:0").split(":").map(Number);
+  const dt=new Date(p[0],(p[1]||1)-1,p[2]||1,t[0]||0,t[1]||0); dt.setMinutes(dt.getMinutes()+durationToMin(e.duration||"1h")); return dt; }
+function isPast(e){ return eventEnd(e).getTime() < Date.now(); }
 
 /* seed */
 function seed(){
@@ -433,6 +445,12 @@ function seed(){
     {id:eid++, sport:"badminton", title:"Badminton dvojice", hostId:u4.id, needed:4,
       location:"Športna dvorana Krim", date:dayISO(2), time:"19:00", duration:"1h 30min",
       notes:"Rabimo še 2 igralca za dvojice.", parts:[u4.id,u1.id]},
+    {id:eid++, sport:"kolo", title:"Nedeljska tura okoli Barja", hostId:u2.id, needed:4,
+      location:"Parkirišče Tacen", date:dayISO(-3), time:"09:00", duration:"2h 30min",
+      notes:"Lepa tura, super družba!", parts:[u2.id,u1.id,u3.id]},
+    {id:eid++, sport:"tek", title:"Večerni tek ob Ljubljanici", hostId:u1.id, needed:5,
+      location:"Špica, Ljubljana", date:dayISO(-6), time:"19:00", duration:"1h",
+      notes:"Sproščen tempo.", parts:[u1.id,u2.id,u4.id]},
   ];
 }
 /* obogati začetne dogodke z novimi polji (raven, čakalna lista, klepet) */
@@ -537,7 +555,7 @@ function svgIcon(type){
 
 /* ================= HOME (feed) ================= */
 function renderHome(){
-  const upcoming = events.filter(e=> filterSport==="all"||e.sport===filterSport)
+  const upcoming = events.filter(e=> (filterSport==="all"||e.sport===filterSport) && !isPast(e))
     .sort((a,b)=> a.date===b.date ? a.time.localeCompare(b.time) : a.date.localeCompare(b.date));
 
   let chips = `<button class="chip ${filterSport==='all'?'active':''}" onclick="setFilter('all')">Vse</button>`;
@@ -600,22 +618,44 @@ function eventCard(e){
 
 /* ================= MY EVENTS ================= */
 function renderMine(){
-  const mine=events.filter(e=>e.parts.includes(me.id))
+  const all=events.filter(e=>e.parts.includes(me.id));
+  const upcoming=all.filter(e=>!isPast(e))
     .sort((a,b)=> a.date===b.date ? a.time.localeCompare(b.time) : a.date.localeCompare(b.date));
+  const done=all.filter(e=>isPast(e))
+    .sort((a,b)=> a.date===b.date ? b.time.localeCompare(a.time) : b.date.localeCompare(a.date));
   const hosted=events.filter(e=>e.hostId===me.id).length;
+
   let body="";
-  if(mine.length===0){
-    body=`<div class="empty"><div class="big">📭</div>Še nisi prijavljen na noben dogodek.<br>Poišči ga na Domov ali ustvari svojega.</div>`;
+  if(upcoming.length===0){
+    body=`<div class="empty"><div class="big">📭</div>Nimaš prihajajočih dogodkov.<br>Poišči ga na Domov ali ustvari svojega.</div>`;
   } else {
     let lastDay=null;
-    mine.forEach(e=>{const d=fmtDay(e.date);
+    upcoming.forEach(e=>{const d=fmtDay(e.date);
       if(d.sortKey!==lastDay){body+=`<div class="day-head">${d.label} · ${d.date}</div>`;lastDay=d.sortKey;}
       body+=eventCard(e);});
   }
+
+  let doneBody="";
+  if(done.length){
+    doneBody=`<div class="day-head" style="margin-top:22px">✓ Izpeljani dogodki (${done.length})</div>`;
+    done.forEach(e=>{ doneBody+=pastCard(e); });
+  }
+
   document.getElementById("screen").innerHTML=`
     <div class="topbar"><div style="flex:1"><h1>Moji dogodki</h1>
-      <div class="sub">${mine.length} prijav · ${hosted} ustvarjenih</div></div>${avatarHTML(me.id)}</div>
-    <div class="list">${body}</div>`;
+      <div class="sub">${upcoming.length} prihajajočih · ${done.length} izpeljanih · ${hosted} ustvarjenih</div></div>${avatarHTML(me.id)}</div>
+    <div class="list">${body}${doneBody}</div>`;
+}
+function pastCard(e){
+  const s=sportById(e.sport); const d=fmtDay(e.date);
+  return `<div class="past-card" onclick="openDetail(${e.id})">
+    <div class="sport-ic" style="background:${s.color}22;width:40px;height:40px;font-size:20px;filter:grayscale(.15)">${s.emoji}</div>
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:700;font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(e.title)}</div>
+      <div style="font-size:12.5px;color:var(--muted)">${d.date} · ${e.time} · ${s.name}</div>
+    </div>
+    <span class="badge-done">IZPELJAN ✓</span>
+  </div>`;
 }
 
 /* ================= DETAIL SHEET ================= */
@@ -646,8 +686,10 @@ function openDetail(id){
     return `<div class="msg ${mine?'me':''}">${mine?'':avatarHTML(m.userId)}<div class="b">${mine?'':`<div class="mn">${u?u.name:'?'}</div>`}<div class="mt">${escHtml(m.text)}</div><div class="mtime">${m.t}</div></div></div>`;}).join("");
   if(!chatHTML) chatHTML=`<div style="color:var(--muted);font-size:13px;padding:2px 0 6px">Še ni sporočil. Napiši prvo 👋</div>`;
 
+  const past=isPast(e);
   let joinBtn;
-  if(iAmIn && e.hostId===me.id) joinBtn=`<button class="join-btn join-full" disabled>Ti si organizator ✓</button>`;
+  if(past) joinBtn=`<button class="join-btn join-full" disabled>✓ Dogodek je zaključen</button>`;
+  else if(iAmIn && e.hostId===me.id) joinBtn=`<button class="join-btn join-full" disabled>Ti si organizator ✓</button>`;
   else if(iAmIn) joinBtn=`<button class="join-btn join-leave" onclick="toggleJoin(${e.id})">Odjavi se z dogodka</button>`;
   else if(full && inWait) joinBtn=`<button class="join-btn join-leave" onclick="toggleWait(${e.id})">Na čakalni listi — odjavi se</button>`;
   else if(full) joinBtn=`<button class="join-btn" style="background:#fff4dc;color:#8a5a00" onclick="toggleWait(${e.id})">Ekipa polna — na čakalno listo ⏳</button>`;
@@ -679,7 +721,7 @@ function openDetail(id){
         <div class="parts"><h4>Ekipa (${joined}/${e.needed})</h4>${partsHTML}</div>
         ${waitHTML}
         ${joinBtn}
-        ${iAmIn?`<button class="join-btn" style="background:#eef6ee;color:#0a7a0a;margin-top:10px" onclick="addToCalendar(events.find(x=>x.id===${e.id}))">📅 Dodaj opomnik v koledar</button>`:""}
+        ${iAmIn&&!past?`<button class="join-btn" style="background:#eef6ee;color:#0a7a0a;margin-top:10px" onclick="addToCalendar(events.find(x=>x.id===${e.id}))">📅 Dodaj opomnik v koledar</button>`:""}
         ${adminCtrl}
         ${iAmIn ? `<div class="chat">
           <h4>💬 Klepet dogodka</h4>
@@ -1055,7 +1097,7 @@ function renderProfile(){
       </div>
     </div>
     <button class="logout" onclick="logout()">Odjava</button>
-    <div style="text-align:center;color:var(--muted);font-size:11.5px;padding:0 0 16px">Zberi se · različica 1.3</div>`;
+    <div style="text-align:center;color:var(--muted);font-size:11.5px;padding:0 0 16px">Zberi se · različica 1.4</div>`;
 }
 
 /* ================= TOAST ================= */
